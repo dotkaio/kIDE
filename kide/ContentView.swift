@@ -1,8 +1,5 @@
 import SwiftUI
 import UniformTypeIdentifiers
-#if os(macOS)
-import AppKit
-#endif
 
 struct TreeRow: Identifiable, Hashable {
     let url: URL
@@ -133,25 +130,9 @@ struct ContentView: View {
                 focus = .sidebar
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .kideSaveAs)) { _ in
-            saveActiveFileAs()
-        }
         .onDisappear {
             workspace.closeWorkspace()
             documents.clear()
-        }
-    }
-
-    private func saveActiveFileAs() {
-        #if os(macOS)
-        guard let activeDoc = documents.activeDoc else { return }
-
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = activeDoc.url.lastPathComponent
-        panel.canCreateDirectories = true
-
-        if panel.runModal() == .OK, let destinationURL = panel.url {
-            documents.saveActiveFileAs(to: destinationURL)
         }
         #endif
     }

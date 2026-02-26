@@ -62,20 +62,6 @@ final class DocumentStore {
         }
     }
 
-
-    func saveActiveFileAs(to destinationURL: URL) {
-        guard var doc = activeDoc else { return }
-
-        do {
-            try doc.text.write(to: destinationURL, atomically: true, encoding: .utf8)
-            doc.url = destinationURL
-            doc.lastSavedText = doc.text
-            activeDoc = doc
-        } catch {
-            print("Save As failed: \(error)")
-        }
-    }
-
     func clear() {
         openDocs.removeAll()
         activeDocID = nil
