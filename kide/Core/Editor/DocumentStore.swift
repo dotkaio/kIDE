@@ -2,15 +2,19 @@ import SwiftUI
 
 struct Document: Identifiable, Hashable {
     let id: UUID
-    let url: URL
+    var url: URL
     var text: String
-    var isDirty: Bool
+    var lastSavedText: String
+
+    var isDirty: Bool {
+        text != lastSavedText
+    }
 
     init(url: URL, text: String) {
         self.id = UUID()
         self.url = url
         self.text = text
-        self.isDirty = false
+        self.lastSavedText = text
     }
 }
 
@@ -23,9 +27,8 @@ final class DocumentStore {
         get { openDocs.first(where: { $0.id == activeDocID }) }
         set {
             guard let newValue else { return }
-            if let idx = openDocs.firstIndex(where: { $0.id == newValue.id }) {
-                openDocs[idx] = newValue
-            }
+            guard let idx = openDocs.firstIndex(where: { $0.id == newValue.id }) else { return }
+            openDocs[idx] = newValue
         }
     }
 
@@ -34,6 +37,7 @@ final class DocumentStore {
             activeDocID = existing.id
             return
         }
+
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         let doc = Document(url: url, text: text)
         openDocs.append(doc)
@@ -43,7 +47,37 @@ final class DocumentStore {
     func updateActiveText(_ newText: String) {
         guard var doc = activeDoc else { return }
         doc.text = newText
-        doc.isDirty = true
         activeDoc = doc
+    }
+
+    func saveActiveFile() {
+        guard var doc = activeDoc else { return }
+
+        do {
+            try doc.text.write(to: doc.url, atomically: true, encoding: .utf8)
+            doc.lastSavedText = doc.text
+            activeDoc = doc
+        } catch {
+            print("Save failed: \(error)")
+        }
+    }
+
+
+    func saveActiveFileAs(to destinationURL: URL) {
+        guard var doc = activeDoc else { return }
+
+        do {
+            try doc.text.write(to: destinationURL, atomically: true, encoding: .utf8)
+            doc.url = destinationURL
+            doc.lastSavedText = doc.text
+            activeDoc = doc
+        } catch {
+            print("Save As failed: \(error)")
+        }
+    }
+
+    func clear() {
+        openDocs.removeAll()
+        activeDocID = nil
     }
 }

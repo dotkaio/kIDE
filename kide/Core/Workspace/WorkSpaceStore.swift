@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 @Observable
 final class WorkspaceStore {
@@ -27,12 +26,26 @@ final class WorkspaceStore {
 
     func toggleExpanded(_ url: URL) {
         guard isDirectory(url) else { return }
-        if expanded.contains(url) { expanded.remove(url) }
-        else { expanded.insert(url) }
+        if expanded.contains(url) {
+            expanded.remove(url)
+        } else {
+            expanded.insert(url)
+        }
+    }
+
+    func expandIfDirectory(_ url: URL) {
+        guard isDirectory(url) else { return }
+        expanded.insert(url)
+    }
+
+    func collapseIfExpanded(_ url: URL) {
+        expanded.remove(url)
     }
 
     func children(of folder: URL) -> [ExplorerEntry] {
-        if let cached = childrenCache[folder] { return cached }
+        if let cached = childrenCache[folder] {
+            return cached
+        }
 
         let fm = FileManager.default
         let urls = (try? fm.contentsOfDirectory(
@@ -46,7 +59,9 @@ final class WorkspaceStore {
             return ExplorerEntry(url: url, isDirectory: isDir)
         }
         .sorted { a, b in
-            if a.isDirectory != b.isDirectory { return a.isDirectory && !b.isDirectory }
+            if a.isDirectory != b.isDirectory {
+                return a.isDirectory && !b.isDirectory
+            }
             return a.url.lastPathComponent.localizedStandardCompare(b.url.lastPathComponent) == .orderedAscending
         }
 

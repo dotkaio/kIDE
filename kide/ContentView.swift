@@ -1,48 +1,34 @@
 import SwiftUI
 import UniformTypeIdentifiers
-
-extension Notification.Name {
-    static let kideSave = Notification.Name("kide.save")
-}
-
-struct ExplorerEntry: Identifiable, Hashable {
-    let url: URL
-    let isDirectory: Bool
-    var id: URL { url }
-}
+#if os(macOS)
+import AppKit
+#endif
 
 struct TreeRow: Identifiable, Hashable {
     let url: URL
     let isDirectory: Bool
     let depth: Int
+
     var id: URL { url }
 }
 
 struct ContentView: View {
     @State private var isPickingFolder = false
 
-    @State private var rootFolder: URL?
-    @State private var selection: URL?
+    @State private var workspace = WorkspaceStore()
+    @State private var documents = DocumentStore()
 
-    @State private var expanded: Set<URL> = []
-    @State private var childrenCache: [URL: [ExplorerEntry]] = [:]
+    enum FocusTarget: Hashable {
+        case sidebar
+        case editor
+    }
 
-    @State private var openedFile: URL?
-    @State private var editorText: String = ""
-
-    @State private var isDirty: Bool = false
-    @State private var lastSavedText: String = ""
-
-    // For sandboxed access (important on iOS; harmless on macOS).
-    @State private var scopedRoot: URL?
-    @State private var isScopeActive = false
-
-    @FocusState private var sidebarFocused: Bool
+    @FocusState private var focus: FocusTarget?
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selection) {
-                if let rootFolder {
+            List(selection: $workspace.selection) {
+                if let rootFolder = workspace.rootFolder {
                     Section(rootFolder.lastPathComponent) {
                         ForEach(rows, id: \.self) { row in
                             rowView(row)
@@ -55,24 +41,31 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Explorer")
-            .focused($sidebarFocused)
-            .onAppear { sidebarFocused = true }
+            .focused($focus, equals: .sidebar)
+            .onAppear { focus = .sidebar }
             .onMoveCommand { direction in
-                guard let sel = selection else { return }
+                guard let selected = workspace.selection else { return }
                 switch direction {
                 case .right:
-                    expandIfDirectory(sel)
+                    workspace.expandIfDirectory(selected)
                 case .left:
-                    collapseIfExpanded(sel)
+                    workspace.collapseIfExpanded(selected)
                 default:
                     break
                 }
             }
-            .onChange(of: selection) { _, newValue in
-                openIfFile(newValue)
+            .onChange(of: workspace.selection) { _, selected in
+                guard let selected else { return }
+
+                if workspace.isDirectory(selected) {
+                    focus = .sidebar
+                } else {
+                    documents.openFile(selected)
+                    focus = .editor
+                }
             }
             .toolbar {
-                ToolbarItemGroup(placement: .primaryAction) {
+                ToolbarItem(placement: .primaryAction) {
                     Button {
                         isPickingFolder = true
                     } label: {
@@ -88,24 +81,25 @@ struct ContentView: View {
                 switch result {
                 case .success(let urls):
                     guard let folder = urls.first else { return }
-                    setRootFolder(folder)
+                    workspace.openWorkspace(folder)
+                    documents.clear()
                 case .failure(let error):
                     print("Folder pick failed: \(error)")
                 }
             }
         } detail: {
-            if let openedFile {
+            if let activeDoc = documents.activeDoc {
                 VStack(spacing: 0) {
                     HStack {
-                        Text(openedFile.lastPathComponent)
+                        Text(activeDoc.url.lastPathComponent)
                             .font(.headline)
 
-                        Text(isDirty ? "●" : "")
+                        Text(activeDoc.isDirty ? "●" : "")
                             .foregroundStyle(.secondary)
 
                         Spacer()
 
-                        Text("\(editorText.utf8.count) bytes")
+                        Text("\(activeDoc.text.utf8.count) bytes")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -114,13 +108,14 @@ struct ContentView: View {
 
                     Divider()
 
-                    TextEditor(text: $editorText)
-                        .font(.system(.body, design: .monospaced))
-                        .ideInputModifiers()
-                        .padding(8)
-                        .onChange(of: editorText) { _, newValue in
-                            isDirty = (newValue != lastSavedText)
-                        }
+                    TextEditor(text: Binding(
+                        get: { documents.activeDoc?.text ?? "" },
+                        set: { documents.updateActiveText($0) }
+                    ))
+                    .font(.system(.body, design: .monospaced))
+                    .ideInputModifiers()
+                    .focused($focus, equals: .editor)
+                    .padding(8)
                 }
             } else {
                 Text("Select a file")
@@ -128,30 +123,57 @@ struct ContentView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .kideSave)) { _ in
-            saveActiveFile()
+            documents.saveActiveFile()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kideTogglePaneFocus)) { _ in
+            switch focus {
+            case .sidebar:
+                focus = .editor
+            default:
+                focus = .sidebar
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kideSaveAs)) { _ in
+            saveActiveFileAs()
         }
         .onDisappear {
-            stopScopeIfNeeded()
+            workspace.closeWorkspace()
+            documents.clear()
         }
+    }
+
+    private func saveActiveFileAs() {
+        #if os(macOS)
+        guard let activeDoc = documents.activeDoc else { return }
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = activeDoc.url.lastPathComponent
+        panel.canCreateDirectories = true
+
+        if panel.runModal() == .OK, let destinationURL = panel.url {
+            documents.saveActiveFileAs(to: destinationURL)
+        }
+        #endif
     }
 
     // MARK: - Tree rows
 
     private var rows: [TreeRow] {
-        guard let rootFolder else { return [] }
+        guard let rootFolder = workspace.rootFolder else { return [] }
         return buildRows(in: rootFolder, depth: 0)
     }
 
     private func buildRows(in folder: URL, depth: Int) -> [TreeRow] {
-        let children = children(of: folder)
+        let children = workspace.children(of: folder)
         var out: [TreeRow] = []
 
         for child in children {
             out.append(TreeRow(url: child.url, isDirectory: child.isDirectory, depth: depth))
-            if child.isDirectory, expanded.contains(child.url) {
+            if child.isDirectory, workspace.expanded.contains(child.url) {
                 out += buildRows(in: child.url, depth: depth + 1)
             }
         }
+
         return out
     }
 
@@ -159,9 +181,9 @@ struct ContentView: View {
         HStack(spacing: 6) {
             if row.isDirectory {
                 Button {
-                    toggleExpanded(row.url)
+                    workspace.toggleExpanded(row.url)
                 } label: {
-                    Image(systemName: expanded.contains(row.url) ? "chevron.down" : "chevron.right")
+                    Image(systemName: workspace.expanded.contains(row.url) ? "chevron.down" : "chevron.right")
                         .foregroundStyle(.secondary)
                         .frame(width: 14)
                 }
@@ -180,111 +202,9 @@ struct ContentView: View {
         }
         .padding(.leading, CGFloat(row.depth) * 14)
         .contentShape(Rectangle())
-    }
-
-    // MARK: - Expand/collapse + open
-
-    private func toggleExpanded(_ url: URL) {
-        guard isDirectory(url) else { return }
-        if expanded.contains(url) { expanded.remove(url) }
-        else { expanded.insert(url) }
-    }
-
-    private func expandIfDirectory(_ url: URL) {
-        guard isDirectory(url) else { return }
-        if !expanded.contains(url) { expanded.insert(url) }
-    }
-
-    private func collapseIfExpanded(_ url: URL) {
-        if expanded.contains(url) { expanded.remove(url) }
-    }
-
-    private func openIfFile(_ url: URL?) {
-        guard let url else {
-            openedFile = nil
-            editorText = ""
-            lastSavedText = ""
-            isDirty = false
-            return
+        .onTapGesture {
+            workspace.selection = row.url
         }
-        if isDirectory(url) {
-            openedFile = nil
-            editorText = ""
-            lastSavedText = ""
-            isDirty = false
-        } else {
-            openedFile = url
-            let loaded = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-            editorText = loaded
-            lastSavedText = loaded
-            isDirty = false
-        }
-    }
-
-    // MARK: - Save
-
-    private func saveActiveFile() {
-        guard let url = openedFile else { return }
-        do {
-            try editorText.write(to: url, atomically: true, encoding: .utf8)
-            lastSavedText = editorText
-            isDirty = false
-        } catch {
-            print("Save failed: \(error)")
-        }
-    }
-
-    // MARK: - Filesystem helpers
-
-    private func children(of folder: URL) -> [ExplorerEntry] {
-        let fm = FileManager.default
-        let urls = (try? fm.contentsOfDirectory(
-            at: folder,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        )) ?? []
-
-        let mapped: [ExplorerEntry] = urls.map { url in
-            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            return ExplorerEntry(url: url, isDirectory: isDir)
-        }
-        .sorted { a, b in
-            if a.isDirectory != b.isDirectory { return a.isDirectory && !b.isDirectory }
-            return a.url.lastPathComponent.localizedStandardCompare(b.url.lastPathComponent) == .orderedAscending
-        }
-
-        return mapped
-    }
-
-    private func isDirectory(_ url: URL) -> Bool {
-        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-    }
-
-    // MARK: - Root folder + security scope
-
-    private func setRootFolder(_ folder: URL) {
-        stopScopeIfNeeded()
-
-        scopedRoot = folder
-        isScopeActive = folder.startAccessingSecurityScopedResource()
-
-        rootFolder = folder
-        selection = nil
-        expanded.removeAll()
-        childrenCache.removeAll()
-
-        openedFile = nil
-        editorText = ""
-        lastSavedText = ""
-        isDirty = false
-    }
-
-    private func stopScopeIfNeeded() {
-        if isScopeActive, let scopedRoot {
-            scopedRoot.stopAccessingSecurityScopedResource()
-        }
-        isScopeActive = false
-        scopedRoot = nil
     }
 }
 
