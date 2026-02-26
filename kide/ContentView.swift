@@ -134,6 +134,7 @@ struct ContentView: View {
             workspace.closeWorkspace()
             documents.clear()
         }
+        #endif
     }
 
     // MARK: - Tree rows

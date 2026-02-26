@@ -2,7 +2,7 @@ import SwiftUI
 
 struct Document: Identifiable, Hashable {
     let id: UUID
-    let url: URL
+    var url: URL
     var text: String
     var lastSavedText: String
 
